@@ -52,6 +52,7 @@ __all__ = (
     "ResNetLayer",
     "SCDown",
     "TorchVision",
+    "DualSKP",
 )
 
 
@@ -2071,3 +2072,51 @@ class RealNVP(nn.Module):
             self.float()
         z, log_det = self.backward_p(x)
         return self.prior.log_prob(z) + log_det
+    
+class DualSKP(nn.Module):
+    def __init__(self, c1, c2):
+        super().__init__()
+
+        self.cv1 = Conv(c1, c2, 1, 1)
+
+        # kernel branches
+        self.k7 = nn.Conv2d(c2, c2, 7, 1, 3, groups=c2)
+        self.k3 = nn.Conv2d(c2, c2, 3, 1, 1, groups=c2)
+
+        # stronger channel attention
+        self.ca = nn.Sequential(
+            nn.AdaptiveAvgPool2d(1),
+            nn.Conv2d(c2, c2 // 4, 1),
+            nn.ReLU(),
+            nn.Conv2d(c2 // 4, c2, 1),
+            nn.Sigmoid()
+        )
+
+        # sharper spatial attention
+        self.sa = nn.Sequential(
+            nn.Conv2d(2, 1, 7, padding=3),
+            nn.Sigmoid()
+        )
+
+        self.out = Conv(c2, c2, 1, 1)
+
+    def forward(self, x):
+        x = self.cv1(x)
+
+        a = self.k7(x)
+        b = self.k3(x)
+
+        feat = a + b
+
+        # channel attention
+        feat = feat * self.ca(feat)
+
+        # spatial attention
+        avg = torch.mean(feat, 1, keepdim=True)
+        mx = torch.max(feat, 1, keepdim=True)[0]
+
+        attn = self.sa(torch.cat([avg, mx], 1))
+
+        feat = feat * attn
+
+        return self.out(feat)
