@@ -2074,7 +2074,7 @@ class RealNVP(nn.Module):
         return self.prior.log_prob(z) + log_det
     
 class DualSKP(nn.Module):
-    def __init__(self, c1, c2):
+    def __init__(self, c1, c2, n=1):
         super().__init__()
 
         self.cv1 = Conv(c1, c2, 1, 1)
