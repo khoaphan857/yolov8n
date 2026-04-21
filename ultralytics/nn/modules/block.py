@@ -2079,13 +2079,14 @@ class DualSKP(nn.Module):
 
         self.cv1 = Conv(c1, c2, 1, 1)
 
-        # texture kernels
+        # multi texture branch
         self.k3 = nn.Conv2d(c2, c2, 3, 1, 1, groups=c2)
         self.k5 = nn.Conv2d(c2, c2, 5, 1, 2, groups=c2)
+        self.k7 = nn.Conv2d(c2, c2, 7, 1, 3, groups=c2)
 
-        self.fuse = Conv(c2 * 2, c2, 1, 1)
+        self.fuse = Conv(c2 * 3, c2, 1, 1)
 
-        # channel attention mạnh cho màu sắc
+        # channel attention (color/material)
         r = max(c2 // 4, 16)
         self.ca = nn.Sequential(
             nn.AdaptiveAvgPool2d(1),
@@ -2095,27 +2096,41 @@ class DualSKP(nn.Module):
             nn.Sigmoid()
         )
 
-        # spatial attention nhẹ
+        # local contrast spatial attention
         self.sa = nn.Sequential(
-            nn.Conv2d(2, 1, 5, padding=2),
+            nn.Conv2d(2, 16, 3, padding=1),
+            nn.ReLU(),
+            nn.Conv2d(16, 1, 3, padding=1),
+            nn.Sigmoid()
+        )
+
+        # anti false positive gate
+        self.gate = nn.Sequential(
+            nn.Conv2d(c2, c2, 1),
             nn.Sigmoid()
         )
 
         self.out = Conv(c2, c2, 1, 1)
 
     def forward(self, x):
+
         x = self.cv1(x)
 
         a = self.k3(x)
         b = self.k5(x)
+        c = self.k7(x)
 
-        feat = self.fuse(torch.cat([a,b],1))
+        feat = self.fuse(torch.cat([a,b,c],1))
 
+        # channel
         feat = feat * self.ca(feat)
 
+        # spatial
         avg = feat.mean(1, keepdim=True)
         mx = feat.max(1, keepdim=True)[0]
-
         feat = feat * self.sa(torch.cat([avg,mx],1))
 
-        return self.out(feat)
+        # suppress noisy background
+        feat = feat * self.gate(feat)
+
+        return self.out(feat + x)
