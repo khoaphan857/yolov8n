@@ -2077,46 +2077,58 @@ class DualSKP(nn.Module):
     def __init__(self, c1, c2, n=1):
         super().__init__()
 
+        # project input
         self.cv1 = Conv(c1, c2, 1, 1)
 
-        # kernel branches
-        self.k7 = nn.Conv2d(c2, c2, 7, 1, 3, groups=c2)
+        # multi-kernel branch (head nên kernel vừa)
         self.k3 = nn.Conv2d(c2, c2, 3, 1, 1, groups=c2)
+        self.k5 = nn.Conv2d(c2, c2, 5, 1, 2, groups=c2)
 
-        # stronger channel attention
+        # fuse branch
+        self.mix = Conv(c2, c2, 1, 1)
+
+        # ---------- Channel Attention ----------
+        r = max(c2 // 8, 16)
+
         self.ca = nn.Sequential(
             nn.AdaptiveAvgPool2d(1),
-            nn.Conv2d(c2, c2 // 4, 1),
-            nn.ReLU(),
-            nn.Conv2d(c2 // 4, c2, 1),
+            nn.Conv2d(c2, r, 1),
+            nn.SiLU(),
+            nn.Conv2d(r, c2, 1),
             nn.Sigmoid()
         )
 
-        # sharper spatial attention
+        # ---------- Spatial Attention ----------
         self.sa = nn.Sequential(
-            nn.Conv2d(2, 1, 7, padding=3),
+            nn.Conv2d(2, 1, 7, padding=3, bias=False),
             nn.Sigmoid()
         )
 
+        # output refine
         self.out = Conv(c2, c2, 1, 1)
 
     def forward(self, x):
+
         x = self.cv1(x)
 
-        a = self.k7(x)
-        b = self.k3(x)
+        # dual selective kernel
+        a = self.k3(x)
+        b = self.k5(x)
 
-        feat = a + b
+        feat = self.mix(a + b)
 
-        # channel attention
+        # ---------- Channel Attention ----------
         feat = feat * self.ca(feat)
 
-        # spatial attention
-        avg = torch.mean(feat, 1, keepdim=True)
-        mx = torch.max(feat, 1, keepdim=True)[0]
+        # ---------- Spatial Attention ----------
+        avg = torch.mean(feat, dim=1, keepdim=True)
+        mx = torch.max(feat, dim=1, keepdim=True)[0]
 
-        attn = self.sa(torch.cat([avg, mx], 1))
+        spatial = self.sa(torch.cat([avg, mx], 1))
 
-        feat = feat * attn
+        feat = feat * spatial
+
+        # residual for head stability
+        feat = feat + x
 
         return self.out(feat)
