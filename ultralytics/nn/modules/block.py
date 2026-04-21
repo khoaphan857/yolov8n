@@ -2077,58 +2077,45 @@ class DualSKP(nn.Module):
     def __init__(self, c1, c2, n=1):
         super().__init__()
 
-        # project input
         self.cv1 = Conv(c1, c2, 1, 1)
 
-        # multi-kernel branch (head nên kernel vừa)
+        # texture kernels
         self.k3 = nn.Conv2d(c2, c2, 3, 1, 1, groups=c2)
         self.k5 = nn.Conv2d(c2, c2, 5, 1, 2, groups=c2)
 
-        # fuse branch
-        self.mix = Conv(c2, c2, 1, 1)
+        self.fuse = Conv(c2 * 2, c2, 1, 1)
 
-        # ---------- Channel Attention ----------
-        r = max(c2 // 8, 16)
-
+        # channel attention mạnh cho màu sắc
+        r = max(c2 // 4, 16)
         self.ca = nn.Sequential(
             nn.AdaptiveAvgPool2d(1),
             nn.Conv2d(c2, r, 1),
-            nn.SiLU(),
+            nn.ReLU(),
             nn.Conv2d(r, c2, 1),
             nn.Sigmoid()
         )
 
-        # ---------- Spatial Attention ----------
+        # spatial attention nhẹ
         self.sa = nn.Sequential(
-            nn.Conv2d(2, 1, 7, padding=3, bias=False),
+            nn.Conv2d(2, 1, 5, padding=2),
             nn.Sigmoid()
         )
 
-        # output refine
         self.out = Conv(c2, c2, 1, 1)
 
     def forward(self, x):
-
         x = self.cv1(x)
 
-        # dual selective kernel
         a = self.k3(x)
         b = self.k5(x)
 
-        feat = self.mix(a + b)
+        feat = self.fuse(torch.cat([a,b],1))
 
-        # ---------- Channel Attention ----------
         feat = feat * self.ca(feat)
 
-        # ---------- Spatial Attention ----------
-        avg = torch.mean(feat, dim=1, keepdim=True)
-        mx = torch.max(feat, dim=1, keepdim=True)[0]
+        avg = feat.mean(1, keepdim=True)
+        mx = feat.max(1, keepdim=True)[0]
 
-        spatial = self.sa(torch.cat([avg, mx], 1))
-
-        feat = feat * spatial
-
-        # residual for head stability
-        feat = feat + x
+        feat = feat * self.sa(torch.cat([avg,mx],1))
 
         return self.out(feat)
