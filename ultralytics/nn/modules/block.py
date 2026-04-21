@@ -2076,62 +2076,49 @@ class RealNVP(nn.Module):
 class DualSKP(nn.Module):
     def __init__(self, c1, c2, n=1):
         super().__init__()
-        
-        # Project input
+
         self.cv1 = Conv(c1, c2, 1, 1)
-        
-        # ---------- Multi-kernel tối ưu cho vật thể nhỏ ----------
-        # Nhánh 1: Bắt chi tiết cục bộ (lá cây, cành)
-        self.k3 = nn.Conv2d(c2, c2, 3, 1, 1, groups=c2, bias=False)
-        
-        # Nhánh 2: Bắt ngữ cảnh (Dilated Conv). 
-        # Tăng Receptive Field để phân biệt nền đất và cây, không làm mờ vật thể
-        self.k3_dilated = nn.Conv2d(c2, c2, 3, 1, 2, dilation=2, groups=c2, bias=False)
-        
-        # Fuse branch
-        self.mix = Conv(c2, c2, 1, 1)
 
-        # ---------- Max-Avg Enhanced Channel Attention ----------
-        # Nhạy cảm hơn với sự biến đổi màu sắc (nâu/xám vs xanh)
-        self.eca = nn.Conv1d(1, 1, kernel_size=3, padding=1, bias=False)
-        self.sig_c = nn.Sigmoid()
+        # texture kernels
+        self.k3 = nn.Conv2d(c2,c2,3,1,1,groups=c2)
+        self.k5 = nn.Conv2d(c2,c2,5,1,2,groups=c2)
 
-        # ---------- Spatial Attention ----------
-        # Giữ kernel 3x3 để đường biên bounding box ôm sát vật thể hơn
-        self.sa = nn.Sequential(
-            nn.Conv2d(2, 1, 3, padding=1, bias=False),
+        self.mix = Conv(c2*2,c2,1,1)
+
+        # color-channel attention
+        r=max(c2//4,16)
+        self.ca = nn.Sequential(
+            nn.AdaptiveAvgPool2d(1),
+            nn.Conv2d(c2,r,1),
+            nn.ReLU(),
+            nn.Conv2d(r,c2,1),
             nn.Sigmoid()
         )
 
-    def forward(self, x):
-        x_proj = self.cv1(x)
+        # local anomaly spatial
+        self.sa = nn.Sequential(
+            nn.Conv2d(2,1,5,padding=2),
+            nn.Sigmoid()
+        )
 
-        # Luồng song song: Chi tiết + Ngữ cảnh
-        a = self.k3(x_proj)
-        b = self.k3_dilated(x_proj)
-        
-        feat = self.mix(a + b)
+        self.out = Conv(c2,c2,1,1)
 
-        # ---------- Max-Avg Channel Attention ----------
-        b_size, c, _, _ = feat.size()
-        
-        # Trích xuất đặc trưng màu sắc tổng quát (Avg) và các đốm nổi bật (Max)
-        y_avg = torch.mean(feat, dim=[2, 3], keepdim=True) # [B, C, 1, 1]
-        y_max = torch.max(feat.view(b_size, c, -1), dim=2)[0].view(b_size, c, 1, 1) # [B, C, 1, 1]
-        
-        # Hòa trộn tín hiệu Channel
-        y = y_avg + y_max
-        y = y.view(b_size, 1, c)                  
-        y = self.eca(y).view(b_size, c, 1, 1)     
-        
-        feat = feat * self.sig_c(y)
+    def forward(self,x):
 
-        # ---------- Spatial Attention ----------
-        avg_out = torch.mean(feat, dim=1, keepdim=True)
-        max_out = torch.max(feat, dim=1, keepdim=True)[0]
-        spatial_attn = self.sa(torch.cat([avg_out, max_out], dim=1))
-        
-        feat = feat * spatial_attn
+        x=self.cv1(x)
 
-        # Residual cộng trực tiếp
-        return feat + x_proj
+        a=self.k3(x)
+        b=self.k5(x)
+
+        f=self.mix(torch.cat([a,b],1))
+
+        # channel
+        f=f*self.ca(f)
+
+        # spatial
+        avg=f.mean(1,keepdim=True)
+        mx=f.max(1,keepdim=True)[0]
+
+        f=f*self.sa(torch.cat([avg,mx],1))
+
+        return self.out(f+x)
